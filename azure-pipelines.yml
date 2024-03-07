@@ -1,0 +1,31 @@
+# Docker
+# Build a Docker image
+# https://docs.microsoft.com/azure/devops/pipelines/languages/docker
+
+trigger:
+- none
+
+resources:
+- repo: self
+
+variables:
+  tag: '$(Build.BuildId)'
+
+stages:
+- stage: Build
+  displayName: Build Oqtane
+  jobs:
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: Docker@2
+      displayName: Build Oqtane Docker Image
+      inputs:
+        containerRegistry: 'krishnavsr_docker_hub-MViable'
+        repository: 'krishnavsr/oqtane'
+        command: 'buildAndPush'
+        dockerfile: '**/Dockerfile'
+        tags: |
+          $(tag)
