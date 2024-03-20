@@ -21,6 +21,7 @@
 @inject IConfigManager ConfigManager
 @inject ITenantManager TenantManager
 @inject ISiteService SiteService
+@inject IPageRepository PageRepository
 @inject IThemeRepository ThemeRepository
 @inject ILanguageRepository LanguageRepository
 @inject ILocalizationManager LocalizationManager
@@ -152,6 +153,11 @@
                             // fallback to use the first page in the collection
                             page = site.Pages.FirstOrDefault();
                         }
+                    }
+                    if (page == null)
+                    {
+                        // personalized pages need to be retrieved using path
+                        page = PageRepository.GetPage(route.PagePath, site.SiteId);
                     }
                     if (page == null || page.IsDeleted)
                     {
@@ -320,11 +326,8 @@
             // get other request attributes
             string url = Context.Request.GetEncodedUrl();
             string referrer = (Context.Request.Headers[HeaderNames.Referer] != StringValues.Empty) ? Context.Request.Headers[HeaderNames.Referer] : "";
-            int? userid = null;
-            if (Context.User.HasClaim(item => item.Type == ClaimTypes.NameIdentifier))
-            {
-                userid = int.Parse(Context.User.Claims.First(item => item.Type == ClaimTypes.NameIdentifier).Value);
-            }
+            int? userid = Context.User.UserId();
+            userid = (userid == -1) ? null : userid;
 
             // check if cookie already exists
             Visitor visitor = null;
@@ -526,12 +529,20 @@
     {
         if (!string.IsNullOrEmpty(resource.Url))
         {
-            var url = (resource.Url.Contains("://")) ? resource.Url : alias.BaseUrl + resource.Url;
-            return "<script" +
-                ((!string.IsNullOrEmpty(resource.Integrity)) ? " integrity=\"" + resource.Integrity + "\"" : "") +
-                ((!string.IsNullOrEmpty(resource.CrossOrigin)) ? " crossorigin=\"" + resource.CrossOrigin + "\"" : "") +
-                ((resource.ES6Module) ? " type=\"module\"" : "") +
-                " src =\"" + url + "\"></script>"; // src at end of element due to enhanced navigation patch algorithm
+            if (!resource.Reload)
+            {
+                var url = (resource.Url.Contains("://")) ? resource.Url : alias.BaseUrl + resource.Url;
+                return "<script" +
+                    ((!string.IsNullOrEmpty(resource.Integrity)) ? " integrity=\"" + resource.Integrity + "\"" : "") +
+                    ((!string.IsNullOrEmpty(resource.CrossOrigin)) ? " crossorigin=\"" + resource.CrossOrigin + "\"" : "") +
+                    ((resource.ES6Module) ? " type=\"module\"" : "") +
+                    " src =\"" + url + "\"></script>"; // src at end of element due to enhanced navigation patch algorithm
+            }
+            else
+            {
+                // use custom element which can execute script on every page transition
+                return "<page-script src=\"" + resource.Url + "\"></page-script>";
+            }
         }
         else
         {
@@ -573,69 +584,66 @@
             }
         }
 
-        foreach (Module module in site.Modules)
+        foreach (Module module in site.Modules.Where(item => item.PageId == page.PageId || item.ModuleId == moduleid))
         {
-            if (module.PageId == page.PageId || module.ModuleId == moduleid)
+            var typename = "";
+            if (module.ModuleDefinition != null)
             {
-                var typename = "";
-                if (module.ModuleDefinition != null)
+                resources = AddResources(resources, module.ModuleDefinition.Resources, ResourceLevel.Module, alias, "Modules", Utilities.GetTypeName(module.ModuleDefinition.ModuleDefinitionName));
+
+                // handle default action
+                if (action == Constants.DefaultAction && !string.IsNullOrEmpty(module.ModuleDefinition.DefaultAction))
                 {
-                    resources = AddResources(resources, module.ModuleDefinition.Resources, ResourceLevel.Module, alias, "Modules", Utilities.GetTypeName(module.ModuleDefinition.ModuleDefinitionName));
+                    action = module.ModuleDefinition.DefaultAction;
+                }
 
-                    // handle default action
-                    if (action == Constants.DefaultAction && !string.IsNullOrEmpty(module.ModuleDefinition.DefaultAction))
+                // get typename template
+                typename = module.ModuleDefinition.ControlTypeTemplate;
+                if (module.ModuleDefinition.ControlTypeRoutes != "")
+                {
+                    // process custom action routes
+                    foreach (string route in module.ModuleDefinition.ControlTypeRoutes.Split(';', StringSplitOptions.RemoveEmptyEntries))
                     {
-                        action = module.ModuleDefinition.DefaultAction;
-                    }
-
-                    // get typename template
-                    typename = module.ModuleDefinition.ControlTypeTemplate;
-                    if (module.ModuleDefinition.ControlTypeRoutes != "")
-                    {
-                        // process custom action routes
-                        foreach (string route in module.ModuleDefinition.ControlTypeRoutes.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                        if (route.StartsWith(action + "="))
                         {
-                            if (route.StartsWith(action + "="))
-                            {
-                                typename = route.Replace(action + "=", "");
-                                break;
-                            }
+                            typename = route.Replace(action + "=", "");
+                            break;
                         }
                     }
                 }
+            }
 
-                // create typename
-                if (Constants.DefaultModuleActions.Contains(action, StringComparer.OrdinalIgnoreCase))
-                {
-                    typename = Constants.DefaultModuleActionsTemplate.Replace(Constants.ActionToken, action);
-                }
-                else
-                {
-                    typename = typename.Replace(Constants.ActionToken, action);
-                }
+            // create typename
+            if (Constants.DefaultModuleActions.Contains(action, StringComparer.OrdinalIgnoreCase))
+            {
+                typename = Constants.DefaultModuleActionsTemplate.Replace(Constants.ActionToken, action);
+            }
+            else
+            {
+                typename = typename.Replace(Constants.ActionToken, action);
+            }
 
-                // ensure component exists and implements IModuleControl
-                module.ModuleType = "";
-                Type moduletype = Type.GetType(typename, false, true); // case insensitive
-                if (moduletype != null && moduletype.GetInterfaces().Contains(typeof(IModuleControl)))
+            // ensure component exists and implements IModuleControl
+            module.ModuleType = "";
+            Type moduletype = Type.GetType(typename, false, true); // case insensitive
+            if (moduletype != null && moduletype.GetInterfaces().Contains(typeof(IModuleControl)))
+            {
+                module.ModuleType = Utilities.GetFullTypeName(moduletype.AssemblyQualifiedName); // get actual type name
+            }
+            if (moduletype != null && module.ModuleType != "")
+            {
+                var obj = Activator.CreateInstance(moduletype) as IModuleControl;
+                if (obj != null)
                 {
-                    module.ModuleType = Utilities.GetFullTypeName(moduletype.AssemblyQualifiedName); // get actual type name
-                }
-                if (moduletype != null && module.ModuleType != "")
-                {
-                    var obj = Activator.CreateInstance(moduletype) as IModuleControl;
-                    if (obj != null)
+                    resources = AddResources(resources, obj.Resources, ResourceLevel.Module, alias, "Modules", moduletype.Namespace);
+                    if (action.ToLower() == "settings" && module.ModuleDefinition != null)
                     {
-                        resources = AddResources(resources, obj.Resources, ResourceLevel.Module, alias, "Modules", moduletype.Namespace);
-                        if (action.ToLower() == "settings" && module.ModuleDefinition != null)
+                        // settings components are embedded within a framework settings module
+                        moduletype = Type.GetType(module.ModuleDefinition.ControlTypeTemplate.Replace(Constants.ActionToken, action), false, true);
+                        if (moduletype != null)
                         {
-                            // settings components are embedded within a framework settings module
-                            moduletype = Type.GetType(module.ModuleDefinition.ControlTypeTemplate.Replace(Constants.ActionToken, action), false, true);
-                            if (moduletype != null)
-                            {
-                                obj = Activator.CreateInstance(moduletype) as IModuleControl;
-                                resources = AddResources(resources, obj.Resources, ResourceLevel.Module, alias, "Modules", moduletype.Namespace);
-                            }
+                            obj = Activator.CreateInstance(moduletype) as IModuleControl;
+                            resources = AddResources(resources, obj.Resources, ResourceLevel.Module, alias, "Modules", moduletype.Namespace);
                         }
                     }
                 }
@@ -643,10 +651,10 @@
         }
 
         // site level resources for modules in site
-        var modules = site.Modules.GroupBy(item => item.ModuleDefinition.ModuleDefinitionName).Select(group => group.First()).ToList();
+        var modules = site.Modules.GroupBy(item => item.ModuleDefinition?.ModuleDefinitionName).Select(group => group.First()).ToList();
         foreach (var module in modules)
         {
-            if (module.ModuleDefinition.Resources != null)
+            if (module.ModuleDefinition?.Resources != null)
             {
                 resources = AddResources(resources, module.ModuleDefinition.Resources.Where(item => item.Level == ResourceLevel.Site).ToList(), ResourceLevel.Module, alias, "Modules", Utilities.GetTypeName(module.ModuleDefinition.ModuleDefinitionName));
             }
@@ -673,20 +681,7 @@
                 // ensure resource does not exist already
                 if (!pageresources.Exists(item => item.Url.ToLower() == resource.Url.ToLower()))
                 {
-                    pageresources.Add(new Resource
-                    {
-                        ResourceType = resource.ResourceType,
-                        Url = resource.Url,
-                        Integrity = resource.Integrity,
-                        CrossOrigin = resource.CrossOrigin,
-                        Bundle = resource.Bundle,
-                        Location = resource.Location,
-                        ES6Module = resource.ES6Module,
-                        Content = resource.Content,
-                        RenderMode = resource.RenderMode,
-                        Level = level,
-                        Namespace = name
-                    });
+                    pageresources.Add(resource.Clone(level, name));
                 }
             }
         }

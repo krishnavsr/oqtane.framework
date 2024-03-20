@@ -1,10 +1,14 @@
 using System.Linq;
 using System.Security.Claims;
+using Oqtane.Models;
+using Oqtane.Shared;
 
 namespace Oqtane.Extensions
 {
     public static class ClaimsPrincipalExtensions
     {
+        // extension methods cannot be properties - the methods below must include a () suffix when referenced
+
         public static string Username(this ClaimsPrincipal claimsPrincipal)
         {
             if (claimsPrincipal.HasClaim(item => item.Type == ClaimTypes.Name))
@@ -69,6 +73,18 @@ namespace Oqtane.Extensions
                 return int.Parse(sitekey.Split(':')[1]);
             }
             return -1;
+        }
+
+        public static bool IsOnlyInRole(this ClaimsPrincipal claimsPrincipal, string role)
+        {
+            var identity = claimsPrincipal.Identities.FirstOrDefault(item => item.AuthenticationType == Constants.AuthenticationScheme);
+            if (identity != null)
+            {
+                // check if user has role claim specified and no other role claims
+                return identity.Claims.Any(item => item.Type == ClaimTypes.Role && item.Value == role) &&
+                    !identity.Claims.Any(item => item.Type == ClaimTypes.Role && item.Value != role);
+            }
+            return false;
         }
     }
 }
