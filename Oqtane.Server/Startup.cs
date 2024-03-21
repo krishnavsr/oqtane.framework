@@ -178,6 +178,12 @@ namespace Oqtane
 
             ServiceActivator.Configure(app.ApplicationServices);
 
+            app.Use(async (context, next) => 
+            {
+                context.Request.Scheme = "https";
+                await next(context);
+            });
+            
             if (env.IsDevelopment())
             {
                 app.UseWebAssemblyDebugging();
