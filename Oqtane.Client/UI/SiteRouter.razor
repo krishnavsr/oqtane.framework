@@ -1,5 +1,6 @@
 @using System.Diagnostics.CodeAnalysis
 @using System.Net
+@using Microsoft.AspNetCore.Http
 @namespace Oqtane.UI
 @inject AuthenticationStateProvider AuthenticationStateProvider
 @inject SiteState SiteState
@@ -11,6 +12,7 @@
 @inject IUserService UserService
 @inject IUrlMappingService UrlMappingService
 @inject ILogService LogService
+@inject ISettingService SettingService
 @inject IJSRuntime JSRuntime
 @implements IHandleAfterRender
 @implements IDisposable
@@ -27,7 +29,7 @@
     private bool _isInternalNavigation = false;
     private bool _navigationInterceptionEnabled;
     private PageState _pagestate;
-    private string _error = "";    
+    private string _error = "";
 
     [Parameter]
     public string RenderMode { get; set; }
@@ -142,38 +144,23 @@
             refresh = true;
         }
 
+        // verify user is authenticated for current site
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        if (authState.User.Identity.IsAuthenticated && authState.User.Claims.Any(item => item.Type == "sitekey" && item.Value == SiteState.Alias.SiteKey))
+        {
+            // get user
+            user = await UserService.GetUserAsync(authState.User.Identity.Name, SiteState.Alias.SiteId);
+            if (user != null)
+            {
+                user.IsAuthenticated = authState.User.Identity.IsAuthenticated;
+            }
+        }
+
         if (PageState != null)
         {
             editmode = PageState.EditMode;
             lastsyncdate = PageState.LastSyncDate;
             visitorId = PageState.VisitorId;
-        }
-        if (PageState?.Page.Path != route.PagePath)
-        {
-            editmode = false; // reset edit mode when navigating to different page
-        }
-        if (querystring.ContainsKey("edit") && querystring["edit"] == "true")
-        {
-            editmode = true; // querystring can set edit mode
-        }
-
-        // verify user is authenticated for current site
-        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
-        if (authState.User.Identity.IsAuthenticated && authState.User.Claims.Any(item => item.Type == "sitekey" && item.Value == SiteState.Alias.SiteKey))
-        {
-            if (PageState == null || PageState.Refresh || refresh || PageState.Alias.SiteId != SiteState.Alias.SiteId)
-            {
-                // get user
-                user = await UserService.GetUserAsync(authState.User.Identity.Name, SiteState.Alias.SiteId);
-                if (user != null)
-                {
-                    user.IsAuthenticated = authState.User.Identity.IsAuthenticated;
-                }
-            }
-            else 
-            {
-                user = PageState.User;
-            }
         }
 
         // process any sync events
@@ -270,6 +257,24 @@
                 // check if user is authorized to view page
                 if (UserSecurity.IsAuthorized(user, PermissionNames.View, page.PermissionList) && (Utilities.IsPageModuleVisible(page.EffectiveDate, page.ExpiryDate) || UserSecurity.IsAuthorized(user, PermissionNames.Edit, page.PermissionList)))
                 {
+                    // edit mode
+                    if (user != null)
+                    {
+                        if (querystring.ContainsKey("editmode") && querystring["edit"] == "true")
+                        {
+                            editmode = true;
+                        }
+                        else
+                        {
+                            editmode = (page.PageId == ((user.Settings.ContainsKey("CP-editmode")) ? int.Parse(user.Settings["CP-editmode"]) : -1));
+                            if (!editmode)
+                            {
+                                var userSettings = new Dictionary<string, string> { { "CP-editmode", "-1" } };
+                                await SettingService.UpdateUserSettingsAsync(userSettings, user.UserId);
+                            }
+                        }
+                    }
+                        
                     // load additional metadata for current page
                     page = ProcessPage(page, site, user, SiteState.Alias);
 
